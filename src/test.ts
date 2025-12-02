@@ -164,17 +164,36 @@ class PROLC_Interface {
   private SetupEndpoints() {
     this.app.get('/prolc/cycle/:cycle_name/action/:action_name', (req: Request, res: Response) => {
       const cycleName = String(req.params.cycle_name);
-      const actionName = String(req.params.action_name);
       let foundCycle = this._manager.$GetCycle(cycleName);
-      
       if (!foundCycle) return res.status(404).json({ message: `Cycle named '${cycleName}' not found.` });
 
+      const actionName = String(req.params.action_name);
       let foundAction = foundCycle.InterfaceActions.get(actionName);
-
       if (!foundAction) return res.status(404).json({ message: `Unable to find Interface Action named '${actionName}' in cycle '${cycleName}'.` });
+
       foundAction.apply(foundCycle);
 
       res.json();
+    });
+
+    this.app.post('/prolc/cycle/:cycle_name/update_code', (req: Request, res: Response) => {
+      const cycleName = String(req.params.cycle_name);
+      let foundCycle = this._manager.$GetCycle(cycleName);
+      if (!foundCycle) return res.status(404).json({ message: `Cycle named '${cycleName}' not found.` });
+      if (!foundCycle.IsHalted) return res.status(404).json({ message: `Cycle named '${cycleName}' is running.` });
+
+      const { code } = req.body;
+
+      if (!code) {
+        return res.status(400).json({ message: 'Code is required' });
+      }
+
+      let codeObj = eval(code); // TODO: Replace with more "safe" way
+      if (!Array.isArray(codeObj)) return res.status(404).json({ message: `Update Code should return an Array.` });
+
+      foundCycle.$UpdateItems(codeObj);
+
+      res.status(201).json();
     });
   }
 
@@ -187,20 +206,35 @@ class _PROLC_Cycle {
     return this._name;
   }
 
-  private readonly _items: PROLC_Cycle__SequenceItem[];
+  private _items: PROLC_Cycle__SequenceItem[];
   private readonly _steps: PROLC_Cycle__Step[] = [];
   private readonly _labels: Map<string, number> = new Map<string, number>();
 
   private _stopRequest: boolean = false;
-  private _actualStep: number = 0;
+  private _actualStep: number = -1;
   private _isLoop: boolean = false;
   private _stepByStep: boolean = false;
   private _debug: boolean = false;
 
   constructor(name: string, items: PROLC_Cycle__SequenceItem[]) {
     this._name = name;
-    this._items = items;
+    this._items = items.slice();
     this.MapItems();
+  }
+
+  public $UpdateItems(items: PROLC_Cycle__SequenceItem[]) {
+    if (!this.IsHalted) return;
+
+    this._items.splice(0, this._items.length);
+    this._steps.splice(0, this._steps.length);
+    this._labels.clear();
+
+    this._items = items.slice();
+    this.MapItems();
+  }
+
+  public get IsHalted() {
+    return (this._actualStep < 0) || (this._stepByStep);
   }
 
   private MapItems() {
@@ -219,6 +253,7 @@ class _PROLC_Cycle {
   private async DoNextStep(): Promise<boolean> {
     if (this._stopRequest) {
       this._stopRequest = false;
+      this._actualStep = -1;
       return false; 
     }
 
