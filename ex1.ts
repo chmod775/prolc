@@ -169,7 +169,7 @@ class PROLC_Cycle__Label extends PROLC_Cycle__Command {
   }
 }
 
-type PROLC_Cycle__Item = PROLC_Cycle__Command | PROLC_Cycle__Feedback | PROLC_Cycle | PROLC_Cycle__Label | string;
+type PROLC_Cycle__Item = PROLC_Cycle__Command | PROLC_Cycle__Feedback | _PROLC_Cycle | PROLC_Cycle__Label | string;
 type PROLC_Cycle__Sequence = PROLC_Cycle__Item | PROLC_Cycle__Item[];
 
 
@@ -191,7 +191,7 @@ class PROLC_Logic {
 }
 
 class PROLC_Machine {
-  constructor(name: string, resetCycle: PROLC_Cycle, autoCycle: PROLC_Cycle) {
+  constructor(name: string, resetCycle: _PROLC_Cycle, autoCycle: _PROLC_Cycle) {
 
   }
 }
@@ -203,7 +203,7 @@ const Y3_STx = new PROLC_Driver_EV('1000.104', { Timeout_Home: '5s', Timeout_Wor
 const D1_STx = new PROLC_Driver_InputsModule('1000.150', { }, { SQ1_STx: 0, SQ2_STx: 1, SQ3_STx: 2, SQ4_STx: 3 });
 
 
-const ResetCycle = new PROLC_Cycle([
+const ResetCycle = new _PROLC_Cycle([
   PROLC_Cycle_WaitUntil(D1_STx.Inputs.SQ1_STx, { }),
 
   [
