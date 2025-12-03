@@ -80,6 +80,26 @@ class PROLC_Cycle__TimeoutAlarm extends PROLC_Cycle__Timeout {
   }
 }
 
+class PROLC_Cycle__TimeoutJump extends PROLC_Cycle__Timeout {
+  private readonly _ms: number;
+  private readonly _label: string;
+
+  constructor(ms: number, label: string) {
+    super();
+    this._ms = ms;
+    this._label = label;
+  }
+
+  async $Watch(cycle: _PROLC_Cycle): Promise<void> {
+    this._succeded = false;
+    await new Promise(resolve => setTimeout(resolve, this._ms) );
+
+    if (!this._succeded) {
+      cycle.JumpLabel(this._label);
+    }
+  }
+}
+
 abstract class PROLC_Cycle__Command {
   protected _timeout?: PROLC_Cycle__Timeout = undefined;
 
@@ -90,15 +110,12 @@ abstract class PROLC_Cycle__Command {
     return this;
   }
 
-  public WithTimeoutContinue(ms: number): this {
-    return this;
-  }
-
   public WithTimeoutDo(ms: number, seq: PROLC_Cycle__SequenceItem[]): this {
     return this;
   }
 
   public WithTimeoutJump(ms: number, label: string): this {
+    this._timeout = new PROLC_Cycle__TimeoutJump(ms, label);
     return this;
   }
 }
@@ -116,7 +133,7 @@ class _PROLC_Cycle_Action extends PROLC_Cycle__Command {
 
   public async $Execute(cycle: _PROLC_Cycle): PROLC_Sync {
     if (this._timeout) {
-      let ret = await Promise.any([
+      let ret = await Promise.race([
         this._timeout.$Watch(cycle),
         this._cb(this._args)
       ]);
@@ -234,15 +251,15 @@ class PROLC_Machine {
   }
 
   public $ReportWarning(msg: string) {
-    console.log(`WARNING: ${msg}`); // TODO:
+    console.log(`> !   WARNING: ${msg}`); // TODO:
   }
   public $ReportError(msg: string) {
     this._cyclesManager.$PauseAll();
-    console.log(`ERROR: ${msg}`); // TODO:
+    console.log(`> !!  ERROR: ${msg}`); // TODO:
   }
   public $ReportCritical(msg: string) {
     this._cyclesManager.$StopAll();
-    console.log(`CRITICAL: ${msg}`); // TODO:
+    console.log(`> !!! CRITICAL: ${msg}`); // TODO:
   }
 }
 
@@ -349,9 +366,9 @@ class _PROLC_Cycle {
   private MapItems() {
     for (let item of this._items) {
       if (typeof item === 'string' || item instanceof String) {
-        let label = item.toString();
+        let label = item.toString().toUpperCase();
         if (this._labels.has(label)) throw `Label '${label}' already exists.`;
-        this._labels.set(label, this._steps.length - 1);
+        this._labels.set(label, this._steps.length);
       } else {
         let newStep = new PROLC_Cycle__Step(item);
         this._steps.push(newStep);
@@ -370,8 +387,8 @@ class _PROLC_Cycle {
 
     let step = this._steps[this._actualStep];
 
-    let stepRet = step.$Execute(this);
     this._actualStep++;
+    let stepRet = step.$Execute(this);
 
     await stepRet;
 
@@ -381,14 +398,19 @@ class _PROLC_Cycle {
       return this.DoNextStep();
   }
 
+  private Step() {
+    this.DoNextStep().catch((msg: string) => this.manager.machine.$ReportCritical(msg));
+  }
+
   public $Register(machine: PROLC_Machine) {
     machine.cyclesManager.$RegisterCycle(this);
     this._manager = machine.cyclesManager;
   }
 
   public JumpLabel(label: string) {
-    if (!this._labels.has(label)) throw `Label '${label}' does not exists.`;
-    this._actualStep = this._labels.get(label)!;
+    let saneLabel = label.toUpperCase();
+    if (!this._labels.has(saneLabel)) throw `Label '${saneLabel}' does not exists.`;
+    this._actualStep = this._labels.get(saneLabel)!;
   }
 
   public InterfaceActions: Map<string, () => void> = new Map<string, () => void>([
@@ -403,7 +425,7 @@ class _PROLC_Cycle {
     this._actualStep = 0;
     this._stepByStep = false;
     this._stopRequest = false;
-    this.DoNextStep().finally(() => console.log('finally')).catch(() => console.log('cathced'));;
+    this.Step();
   }
   public $Stop() {
     if (this._stepByStep) {
@@ -419,11 +441,11 @@ class _PROLC_Cycle {
   }
   public $Continue() {
     this._stepByStep = false;
-    this.DoNextStep();
+    this.Step();
   }
   public $NextStep() {
     this._stepByStep = true;
-    this.DoNextStep();
+    this.Step();
   }
 }
 function PROLC_Cycle(name: string, items: PROLC_Cycle__SequenceItem[]) {
@@ -433,7 +455,6 @@ function PROLC_Cycle(name: string, items: PROLC_Cycle__SequenceItem[]) {
 
 async function Say(args: { content: string }): PROLC_Sync {
   console.log(args.content);
-  throw 'dont know';
 }
 
 async function Delay(args: { ms: number }): PROLC_Sync {
@@ -445,18 +466,22 @@ let MainMachine = new PROLC_Machine('MainMachine');
 
 PROLC_Cycle('TestCycle', [
   'start',
-  PROLC_Cycle_Action(Say, { content: 'HelloWorld_1' }),//.WithTimeoutAlarm(1000, 'Error message 1'),
+  PROLC_Cycle_Action(Say, { content: 'HelloWorld_1' }).WithTimeoutAlarm(1000, 'Error message 1'),
 
-  PROLC_Cycle_Action(Delay, { ms: 1000 }).WithTimeoutAlarm(1000, 'Error message 2'),
+  PROLC_Cycle_Action(Delay, { ms: 1000 }),//.WithTimeoutJump(100, 'error_timeout'), //.WithTimeoutAlarm(1000, 'Error message 2'),
 
   PROLC_Cycle_Action(Say, { content: 'HelloWorld_2' }).WithTimeoutDo(2000, [ PROLC_Cycle_Jump('start') ]),
   PROLC_Cycle_Action(Say, { content: 'HelloWorld_3' }),
 
   [
     PROLC_Cycle_Action(Say, { content: 'ABC' }),
-    PROLC_Cycle_Action(Delay, { ms: 1000 }),
+    PROLC_Cycle_Action(Delay, { ms: 1000 }).WithTimeoutJump(100, 'error_timeout'),
     PROLC_Cycle_Action(Say, { content: 'DEF' }),
   ],
 
-  PROLC_Cycle_Jump('start')
+  PROLC_Cycle_Jump('start'),
+
+  'error_timeout',
+  PROLC_Cycle_Action(Say, { content: 'Error_timeout' }),
+
 ]).$Register(MainMachine);
