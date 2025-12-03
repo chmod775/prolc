@@ -51,8 +51,56 @@ class PROLC_Driver_EV extends PROLC_Driver {
 
 type PROLC_Sync = Promise<void>;
 
+abstract class PROLC_Cycle__Timeout {
+  protected _succeded: boolean = false;
+
+  abstract $Watch(cycle: _PROLC_Cycle): Promise<void>;
+  public $MarkAsSucceded() {
+    this._succeded = true;
+  }
+}
+
+class PROLC_Cycle__TimeoutAlarm extends PROLC_Cycle__Timeout {
+  private readonly _ms: number;
+  private readonly _errMessage: string;
+
+  constructor(ms: number, errMessage: string) {
+    super();
+    this._ms = ms;
+    this._errMessage = errMessage;
+  }
+
+  async $Watch(cycle: _PROLC_Cycle): Promise<void> {
+    this._succeded = false;
+    await new Promise(resolve => setTimeout(resolve, this._ms) );
+
+    if (!this._succeded) {
+      cycle.manager.machine.$ReportError(this._errMessage);
+    }
+  }
+}
+
 abstract class PROLC_Cycle__Command {
+  protected _timeout?: PROLC_Cycle__Timeout = undefined;
+
   abstract $Execute(cycle: _PROLC_Cycle): PROLC_Sync;
+
+  public WithTimeoutAlarm(ms: number, errMessage: string): this {
+    this._timeout = new PROLC_Cycle__TimeoutAlarm(ms, errMessage);
+    return this;
+  }
+
+  public WithTimeoutContinue(ms: number): this {
+    return this;
+  }
+
+  public WithTimeoutDo(ms: number, seq: PROLC_Cycle__SequenceItem[]): this {
+    return this;
+  }
+
+  public WithTimeoutJump(ms: number, label: string): this {
+    return this;
+  }
 }
 
 class _PROLC_Cycle_Action extends PROLC_Cycle__Command {
@@ -67,7 +115,16 @@ class _PROLC_Cycle_Action extends PROLC_Cycle__Command {
   }
 
   public async $Execute(cycle: _PROLC_Cycle): PROLC_Sync {
-    return await this._cb(this._args);
+    if (this._timeout) {
+      let ret = await Promise.any([
+        this._timeout.$Watch(cycle),
+        this._cb(this._args)
+      ]);
+      this._timeout?.$MarkAsSucceded();
+      return ret;
+    } else {
+      return await this._cb(this._args);
+    }
   }
 }
 function PROLC_Cycle_Action<A>(cb: (args: A) => PROLC_Sync, args: A): _PROLC_Cycle_Action {
@@ -122,9 +179,15 @@ class PROLC_Cycle__Step {
 }
 
 class _PROLC_CyclesManager {
+  private readonly _machine: PROLC_Machine;
+  public get machine(): PROLC_Machine {
+    return this._machine;
+  }
+
   private readonly _cycles: Map<string, _PROLC_Cycle> = new Map<string, _PROLC_Cycle>();
 
-  constructor(cycles: _PROLC_Cycle[]) {
+  constructor(machine: PROLC_Machine, cycles: _PROLC_Cycle[]) {
+    this._machine = machine;
     for (let cycle of cycles) {
       this.$RegisterCycle(cycle);
     }
@@ -138,9 +201,49 @@ class _PROLC_CyclesManager {
   public $GetCycle(name: string): _PROLC_Cycle | undefined {
     return this._cycles.get(name);
   }
+
+  public $PauseAll() {
+    for (let [cycleName, cycle] of this._cycles) {
+      cycle.$Pause();
+    }
+  }
+  public $StopAll() {
+    for (let [cycleName, cycle] of this._cycles) {
+      cycle.$Stop();
+    }
+  }
 }
-function PROLC_CyclesManager(cycles: _PROLC_Cycle[]) {
-  return new _PROLC_CyclesManager(cycles);
+
+class PROLC_Machine {
+  private readonly _name: string;
+  public get name(): string {
+    return this._name;
+  }
+
+  private readonly _cyclesManager: _PROLC_CyclesManager;
+  public get cyclesManager(): _PROLC_CyclesManager {
+    return this._cyclesManager;
+  }
+
+  private readonly _interface: PROLC_Interface;
+
+  constructor(name: string) {
+    this._name = name;
+    this._cyclesManager = new _PROLC_CyclesManager(this, []);
+    this._interface = new PROLC_Interface(this._cyclesManager);
+  }
+
+  public $ReportWarning(msg: string) {
+    console.log(`WARNING: ${msg}`); // TODO:
+  }
+  public $ReportError(msg: string) {
+    this._cyclesManager.$PauseAll();
+    console.log(`ERROR: ${msg}`); // TODO:
+  }
+  public $ReportCritical(msg: string) {
+    this._cyclesManager.$StopAll();
+    console.log(`CRITICAL: ${msg}`); // TODO:
+  }
 }
 
 
@@ -204,6 +307,12 @@ class _PROLC_Cycle {
   private readonly _name: string;
   public get name(): string {
     return this._name;
+  }
+
+  private _manager?: _PROLC_CyclesManager;
+  public get manager(): _PROLC_CyclesManager {
+    if (!this._manager) throw `Cycle manager not defined for cycle named '${this.name}'.`;
+    return this._manager;
   }
 
   private _items: PROLC_Cycle__SequenceItem[];
@@ -272,8 +381,9 @@ class _PROLC_Cycle {
       return this.DoNextStep();
   }
 
-  public $Register(manager: _PROLC_CyclesManager) {
-    manager.$RegisterCycle(this);
+  public $Register(machine: PROLC_Machine) {
+    machine.cyclesManager.$RegisterCycle(this);
+    this._manager = machine.cyclesManager;
   }
 
   public JumpLabel(label: string) {
@@ -291,10 +401,17 @@ class _PROLC_Cycle {
 
   public async $Start() {
     this._actualStep = 0;
-    this.DoNextStep();
+    this._stepByStep = false;
+    this._stopRequest = false;
+    this.DoNextStep().finally(() => console.log('finally')).catch(() => console.log('cathced'));;
   }
   public $Stop() {
-    this._stopRequest = true;
+    if (this._stepByStep) {
+      this._actualStep = -1;
+      this._stopRequest = false;
+    } else {
+      this._stopRequest = true;
+    }
   }
 
   public $Pause() {
@@ -316,6 +433,7 @@ function PROLC_Cycle(name: string, items: PROLC_Cycle__SequenceItem[]) {
 
 async function Say(args: { content: string }): PROLC_Sync {
   console.log(args.content);
+  throw 'dont know';
 }
 
 async function Delay(args: { ms: number }): PROLC_Sync {
@@ -323,17 +441,15 @@ async function Delay(args: { ms: number }): PROLC_Sync {
 }
 
 
-let MainCycleManager = PROLC_CyclesManager([
-]);
-let MainInterface = new PROLC_Interface(MainCycleManager);
+let MainMachine = new PROLC_Machine('MainMachine');
 
 PROLC_Cycle('TestCycle', [
   'start',
-  PROLC_Cycle_Action(Say, { content: 'HelloWorld_1' }),
+  PROLC_Cycle_Action(Say, { content: 'HelloWorld_1' }),//.WithTimeoutAlarm(1000, 'Error message 1'),
 
-  PROLC_Cycle_Action(Delay, { ms: 1000 }),
+  PROLC_Cycle_Action(Delay, { ms: 1000 }).WithTimeoutAlarm(1000, 'Error message 2'),
 
-  PROLC_Cycle_Action(Say, { content: 'HelloWorld_2' }),
+  PROLC_Cycle_Action(Say, { content: 'HelloWorld_2' }).WithTimeoutDo(2000, [ PROLC_Cycle_Jump('start') ]),
   PROLC_Cycle_Action(Say, { content: 'HelloWorld_3' }),
 
   [
@@ -343,4 +459,4 @@ PROLC_Cycle('TestCycle', [
   ],
 
   PROLC_Cycle_Jump('start')
-]).$Register(MainCycleManager);
+]).$Register(MainMachine);
