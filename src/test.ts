@@ -6,7 +6,7 @@ abstract class PROLC_Driver {
     this._address = address;
   }
 
-  protected abstract $Setup(): void;
+  abstract $Setup(machine: PROLC_Machine): void;
 }
 
 
@@ -36,7 +36,7 @@ class PROLC_Driver_EV extends PROLC_Driver {
     super(address);
   }
 
-  protected $Setup() {
+  $Setup() {
     throw new Error("Method not implemented.");
   }
 
@@ -120,11 +120,11 @@ abstract class PROLC_Cycle__Command {
   }
 }
 
-class _PROLC_Cycle_Action extends PROLC_Cycle__Command {
-  private readonly _cb: (args: any) => PROLC_Sync;
-  private readonly _args: any;
+class _PROLC_Cycle_Action<A> extends PROLC_Cycle__Command {
+  private readonly _cb: (args: A) => PROLC_Sync;
+  private readonly _args: A | (() => A);
 
-  constructor(cb: (args: any) => PROLC_Sync, args: any) {
+  constructor(cb: (args: A) => PROLC_Sync, args: A | (() => A)) {
     super();
 
     this._cb = cb;
@@ -132,20 +132,21 @@ class _PROLC_Cycle_Action extends PROLC_Cycle__Command {
   }
 
   public async $Execute(cycle: _PROLC_Cycle): PROLC_Sync {
+    let argsValue = (this._args instanceof Function) ? this._args() : this._args;
     if (this._timeout) {
       let ret = await Promise.race([
         this._timeout.$Watch(cycle),
-        this._cb(this._args)
+        this._cb(argsValue)
       ]);
       this._timeout?.$MarkAsSucceded();
       return ret;
     } else {
-      return await this._cb(this._args);
+      return await this._cb(argsValue);
     }
   }
 }
-function PROLC_Cycle_Action<A>(cb: (args: A) => PROLC_Sync, args: A): _PROLC_Cycle_Action {
-  return new _PROLC_Cycle_Action(cb, args);
+function PROLC_Cycle_Action<A>(cb: (args: A) => PROLC_Sync, args: A | (() => A)): _PROLC_Cycle_Action<A> {
+  return new _PROLC_Cycle_Action<A>(cb, args);
 }
 
 
@@ -231,7 +232,7 @@ class _PROLC_CyclesManager {
   }
 }
 
-class PROLC_Machine {
+abstract class PROLC_Machine {
   private readonly _name: string;
   public get name(): string {
     return this._name;
@@ -244,10 +245,31 @@ class PROLC_Machine {
 
   private readonly _interface: PROLC_Interface;
 
+  private readonly _drivers: PROLC_Driver[] = [];
+
+  private readonly _dataStorages: Map<string, PROLC_DataStorage<any>> = new Map<string, PROLC_DataStorage<any>>();
+
   constructor(name: string) {
     this._name = name;
     this._cyclesManager = new _PROLC_CyclesManager(this, []);
     this._interface = new PROLC_Interface(this._cyclesManager);
+
+    this.SetupDrivers();
+  }
+
+  private SetupDrivers() {
+    for (let driver of this._drivers) {
+      driver.$Setup(this);
+    }
+  }
+
+  public $RegisterDataStorages(storages: { [key: string]: PROLC_DataStorage<any> }) {
+    for (let storageName in storages) {
+      let storageItem = storages[storageName];
+
+      if (this._dataStorages.has(storageName)) throw `DataStorage named '${storageName}' already registered for machine named '${this.name}'.`;
+      this._dataStorages.set(storageName, storageItem);
+    }
   }
 
   public $ReportWarning(msg: string) {
@@ -260,6 +282,12 @@ class PROLC_Machine {
   public $ReportCritical(msg: string) {
     this._cyclesManager.$StopAll();
     console.log(`> !!! CRITICAL: ${msg}`); // TODO:
+  }
+}
+
+class PROLC_MachineBasic extends PROLC_Machine {
+  constructor(name: string) {
+    super(name);
   }
 }
 
@@ -453,6 +481,22 @@ function PROLC_Cycle(name: string, items: PROLC_Cycle__SequenceItem[]) {
 }
 
 
+class PROLC_DataStorage<D> {
+  // private _name: string;
+  // public get name(): string {
+  //   return this._name;
+  // }
+
+  private readonly _data: D;
+  public get data(): D {
+    return this._data;
+  }
+
+  constructor(init: D) {
+    this._data = init;
+  }
+}
+
 async function Say(args: { content: string }): PROLC_Sync {
   console.log(args.content);
 }
@@ -462,11 +506,20 @@ async function Delay(args: { ms: number }): PROLC_Sync {
 }
 
 
-let MainMachine = new PROLC_Machine('MainMachine');
+let MainMachine = new PROLC_MachineBasic('MainMachine');
+
+let GlobalData = new PROLC_DataStorage({
+  cnt: 0
+});
+
+MainMachine.$RegisterDataStorages({
+  GlobalData
+});
 
 PROLC_Cycle('TestCycle', [
   'start',
-  PROLC_Cycle_Action(Say, { content: 'HelloWorld_1' }).WithTimeoutAlarm(1000, 'Error message 1'),
+  PROLC_Cycle_Action(async () => { GlobalData.data.cnt++ }, { }),
+  PROLC_Cycle_Action(Say, () => { return { content: `HelloWorld_${GlobalData.data.cnt}` } }).WithTimeoutAlarm(1000, 'Error message 1'),
 
   PROLC_Cycle_Action(Delay, { ms: 1000 }),//.WithTimeoutJump(100, 'error_timeout'), //.WithTimeoutAlarm(1000, 'Error message 2'),
 
@@ -475,7 +528,7 @@ PROLC_Cycle('TestCycle', [
 
   [
     PROLC_Cycle_Action(Say, { content: 'ABC' }),
-    PROLC_Cycle_Action(Delay, { ms: 1000 }).WithTimeoutJump(100, 'error_timeout'),
+    PROLC_Cycle_Action(Delay, { ms: 1000 }).WithTimeoutJump(1200, 'error_timeout'),
     PROLC_Cycle_Action(Say, { content: 'DEF' }),
   ],
 
